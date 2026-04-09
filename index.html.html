@@ -1465,6 +1465,13 @@ async function handleSignup() {
   const { data, error } = await db.auth.signUp({ email, password: pass });
   setLoading('signup-btn', false, 'Create Account');
   if (error) { const el = document.getElementById('signup-general-err'); el.textContent = error.message; el.classList.add('show'); return; }
+  // If email confirmation is required, data.session will be null
+  if (!data.session) {
+    const el = document.getElementById('signup-general-err');
+    el.textContent = 'Check your email to confirm your account, then sign in.';
+    el.classList.add('show');
+    return;
+  }
   currentUser = data.user;
   const { error: pErr } = await db.from('profiles').insert({
     id: currentUser.id, username, display_name: name,
@@ -1473,6 +1480,7 @@ async function handleSignup() {
   if (pErr && pErr.code === '23505') {
     const el = document.getElementById('signup-username-err'); el.textContent = 'Username already taken'; el.classList.add('show'); return;
   }
+  if (pErr) { const el = document.getElementById('signup-general-err'); el.textContent = pErr.message; el.classList.add('show'); return; }
   await afterAuth();
 }
 
@@ -1540,8 +1548,10 @@ function enterApp() {
 
   const miniAvatar = document.getElementById('user-mini-avatar');
   if (currentProfile.avatar_url) {
+    miniAvatar.style.background = '#1c2236';
     miniAvatar.innerHTML = `<img src="${escHtml(currentProfile.avatar_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
   } else {
+    miniAvatar.style.background = currentProfile.avatar_color || 'linear-gradient(135deg,var(--accent),var(--pink))';
     miniAvatar.textContent = currentProfile.initials;
   }
   loadConversations();
