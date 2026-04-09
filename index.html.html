@@ -20,6 +20,7 @@ create table if not exists profiles (
   display_name text not null,
   initials text not null,
   avatar_color text default 'linear-gradient(135deg,#6366f1,#ec4899)',
+  avatar_url text,
   created_at timestamptz default now()
 );
 alter table profiles enable row level security;
@@ -28,7 +29,7 @@ create policy "Profiles are viewable by authenticated users"
 create policy "Users can insert own profile"
   on profiles for insert with check (auth.uid() = id);
 create policy "Users can update own profile"
-  on profiles for update using (auth.uid() = id);
+  on profiles for update using (auth.uid() = id) with check (auth.uid() = id);
 
 -- 2. CONVERSATIONS
 create table if not exists conversations (
@@ -1014,7 +1015,7 @@ async function saveProfile() {
   };
   if (avatarUrl) profileData.avatar_url = avatarUrl;
 
-  const { error } = await db.from('profiles').insert(profileData);
+  const { error } = await db.from('profiles').upsert(profileData, { onConflict: 'id' });
   setLoading('profile-btn', false);
   document.getElementById('profile-btn').textContent = 'Save & Continue →';
 
