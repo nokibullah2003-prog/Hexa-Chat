@@ -31,9 +31,14 @@ create policy "Users can insert own profile"
 create policy "Users can update own profile"
   on profiles for update using (auth.uid() = id) with check (auth.uid() = id);
 
--- 2. CONVERSATIONS
+-- 2. CONVERSATIONS (now supports group chats)
 create table if not exists conversations (
   id uuid primary key default gen_random_uuid(),
+  type text default 'dm' check (type in ('dm','group')),
+  name text,
+  description text,
+  avatar_color text default 'linear-gradient(135deg,#6366f1,#14b8a6)',
+  created_by uuid references profiles(id),
   created_at timestamptz default now()
 );
 alter table conversations enable row level security;
@@ -43,11 +48,15 @@ create policy "Participants can view conversation"
   );
 create policy "Authenticated users can create conversations"
   on conversations for insert with check (auth.role() = 'authenticated');
+create policy "Creator can update conversation"
+  on conversations for update using (auth.uid() = created_by);
 
--- 3. CONVERSATION PARTICIPANTS
+-- 3. CONVERSATION PARTICIPANTS (with role for groups)
 create table if not exists conversation_participants (
   conversation_id uuid references conversations(id) on delete cascade,
   user_id uuid references profiles(id) on delete cascade,
+  role text default 'member' check (role in ('admin','member')),
+  joined_at timestamptz default now(),
   primary key (conversation_id, user_id)
 );
 alter table conversation_participants enable row level security;
@@ -57,6 +66,8 @@ create policy "Participants can view"
   );
 create policy "Authenticated can insert participants"
   on conversation_participants for insert with check (auth.role() = 'authenticated');
+create policy "Admins can delete participants"
+  on conversation_participants for delete using (auth.uid() = user_id);
 
 -- 4. MESSAGES
 create table if not exists messages (
@@ -77,8 +88,9 @@ create policy "Participants can send messages"
     exists (select 1 from conversation_participants where conversation_id = messages.conversation_id and user_id = auth.uid())
   );
 
--- 5. Enable realtime on messages
+-- 5. Enable realtime
 alter publication supabase_realtime add table messages;
+alter publication supabase_realtime add table conversation_participants;
 
 ═══════════════════════════════════════════════════════════════
 -->
@@ -230,6 +242,17 @@ alter publication supabase_realtime add table messages;
   .avatar .dot { position:absolute; bottom:1px; right:1px; width:10px; height:10px; border-radius:50%; border:2px solid var(--bg2); background:var(--online); }
   .avatar-lg { width:48px; height:48px; font-size:18px; }
 
+  /* Group avatar hex shape */
+  .avatar-group {
+    width:38px; height:38px;
+    clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:14px; color:#fff; flex-shrink:0;
+  }
+  .avatar-group-lg {
+    width:48px; height:48px; font-size:18px;
+  }
+
   /* ── APP LAYOUT ── */
   #app-screen { display:none; height:100vh; position:relative; z-index:10; }
   #app-screen.visible { display:flex; }
@@ -267,6 +290,23 @@ alter publication supabase_realtime add table messages;
     font-size:16px; color:var(--text2); transition:all 0.2s;
   }
   .icon-btn:hover { background:var(--surface2); color:var(--accent2); }
+
+  /* ── INBOX TABS (DMs / Groups) ── */
+  .inbox-tabs {
+    display:flex; gap:0; background:var(--surface); border-radius:10px; padding:3px; margin-bottom:12px;
+  }
+  .inbox-tab {
+    flex:1; padding:7px 10px; border:none; background:transparent;
+    border-radius:8px; font-family:inherit; font-size:13px; font-weight:500;
+    color:var(--text2); cursor:pointer; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:5px;
+  }
+  .inbox-tab.active { background:var(--bg2); color:var(--text); box-shadow:0 2px 8px rgba(0,0,0,0.3); }
+  .inbox-tab-badge {
+    background:var(--accent); color:#fff; font-size:9px; font-weight:700;
+    border-radius:8px; padding:1px 5px; min-width:16px; text-align:center; display:none;
+  }
+  .inbox-tab-badge.show { display:inline-block; }
+
   .search-wrap { position:relative; }
   .search-wrap input {
     width:100%; padding:9px 12px 9px 36px;
@@ -290,6 +330,12 @@ alter publication supabase_realtime add table messages;
   .contact-meta { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
   .contact-time { font-size:11px; color:var(--text3); }
   .unread-badge { background:var(--accent); color:#fff; font-size:10px; font-weight:700; border-radius:10px; padding:1px 6px; min-width:18px; text-align:center; }
+  .contact-type-tag {
+    font-size:9px; font-weight:700; padding:2px 6px; border-radius:5px; text-transform:uppercase;
+    letter-spacing:0.5px;
+  }
+  .contact-type-tag.group { background:rgba(20,184,166,0.15); color:var(--teal); }
+  .contact-type-tag.dm { background:rgba(99,102,241,0.15); color:var(--accent2); }
 
   .contacts-empty { text-align:center; padding:40px 20px; color:var(--text3); font-size:13px; }
   .contacts-empty .empty-icon { font-size:32px; margin-bottom:10px; }
@@ -302,7 +348,8 @@ alter publication supabase_realtime add table messages;
     background:var(--bg2); flex-shrink:0;
   }
   .chat-partner-name { font-size:16px; font-weight:700; color:var(--text); }
-  .chat-partner-status { font-size:12px; color:var(--online); display:flex; align-items:center; gap:5px; }
+  .chat-partner-status { font-size:12px; color:var(--text2); display:flex; align-items:center; gap:5px; }
+  .chat-partner-status.online { color:var(--online); }
   .status-dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
   .chat-header-actions { margin-left:auto; display:flex; gap:6px; }
 
@@ -321,6 +368,8 @@ alter publication supabase_realtime add table messages;
   .msg-row.mine { flex-direction:row-reverse; }
   .msg-avatar { flex-shrink:0; }
   .msg-avatar .avatar { width:28px; height:28px; font-size:11px; }
+  .msg-avatar .avatar-group { width:28px; height:28px; font-size:11px; }
+  .msg-sender-name { font-size:11px; color:var(--text3); margin-bottom:3px; font-weight:500; }
   .msg-bubble {
     max-width:68%; padding:10px 14px; border-radius:16px; font-size:14px; line-height:1.55;
     position:relative; word-break:break-word;
@@ -331,6 +380,13 @@ alter publication supabase_realtime add table messages;
   .msg-row.mine .msg-time { justify-content:flex-end; }
   .read-tick { color:var(--teal); font-size:11px; }
   .msg-group-spacer { margin-bottom:10px; }
+
+  /* System messages */
+  .msg-system {
+    text-align:center; font-size:11px; color:var(--text3); padding:6px 16px;
+    background:rgba(99,117,196,0.06); border-radius:20px; margin:8px auto;
+    max-width:80%;
+  }
 
   .typing-indicator {
     display:flex; align-items:center; gap:8px;
@@ -362,7 +418,7 @@ alter publication supabase_realtime add table messages;
 
   /* ── INFO PANEL ── */
   .info-panel {
-    width:260px; background:var(--bg2); border-left:1px solid var(--border);
+    width:280px; background:var(--bg2); border-left:1px solid var(--border);
     display:flex; flex-direction:column; overflow-y:auto; flex-shrink:0;
     scrollbar-width:thin; scrollbar-color:var(--surface2) transparent;
   }
@@ -373,6 +429,13 @@ alter publication supabase_realtime add table messages;
     font-size:26px; font-weight:700; color:#fff;
     background:linear-gradient(135deg,var(--accent),var(--pink));
     box-shadow:0 8px 24px rgba(99,102,241,0.3);
+  }
+  .info-avatar-group {
+    width:72px; height:72px; margin:0 auto 12px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:26px; font-weight:700; color:#fff;
+    clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+    box-shadow:0 8px 24px rgba(20,184,166,0.3);
   }
   .info-name { font-size:16px; font-weight:700; color:var(--text); }
   .info-email { font-size:12px; color:var(--text3); margin-top:4px; }
@@ -392,6 +455,17 @@ alter publication supabase_realtime add table messages;
   .info-action.danger { color:var(--danger); }
   .info-action.danger:hover { background:rgba(239,68,68,0.1); border-color:rgba(239,68,68,0.3); }
   .info-action-icon { font-size:16px; }
+
+  /* Members list in info panel */
+  .member-item {
+    display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);
+  }
+  .member-item:last-child { border-bottom:none; }
+  .member-info { flex:1; }
+  .member-name { font-size:13px; font-weight:600; color:var(--text); }
+  .member-username { font-size:11px; color:var(--text3); }
+  .member-role { font-size:9px; font-weight:700; padding:2px 6px; border-radius:5px;
+    background:rgba(245,158,11,0.15); color:var(--gold); text-transform:uppercase; }
 
   /* ── WELCOME SCREEN ── */
   .welcome-screen {
@@ -418,14 +492,22 @@ alter publication supabase_realtime add table messages;
   .modal-overlay.hidden { display:none; }
   .modal {
     background:var(--bg2); border:1px solid var(--border2); border-radius:20px;
-    padding:28px; width:100%; max-width:420px;
+    padding:28px; width:100%; max-width:440px;
     box-shadow:0 32px 64px rgba(0,0,0,0.6);
-    position:relative;
+    position:relative; max-height:90vh; overflow-y:auto;
   }
   .modal-title { font-size:18px; font-weight:700; margin-bottom:6px; }
   .modal-sub { font-size:13px; color:var(--text2); margin-bottom:20px; }
   .modal-close { position:absolute; top:20px; right:20px; background:none; border:none; color:var(--text3); font-size:20px; cursor:pointer; }
   .modal-close:hover { color:var(--text); }
+  .modal-tabs { display:flex; background:var(--surface); border-radius:10px; padding:3px; gap:3px; margin-bottom:20px; }
+  .modal-tab {
+    flex:1; padding:8px; border:none; background:transparent;
+    border-radius:8px; font-family:inherit; font-size:13px; font-weight:500;
+    color:var(--text2); cursor:pointer; transition:all 0.2s;
+  }
+  .modal-tab.active { background:var(--bg2); color:var(--text); box-shadow:0 2px 8px rgba(0,0,0,0.3); }
+
   .user-result {
     display:flex; align-items:center; gap:12px; padding:10px 14px;
     border-radius:10px; cursor:pointer; transition:all 0.15s;
@@ -436,6 +518,29 @@ alter publication supabase_realtime add table messages;
   .user-result-username { font-size:12px; color:var(--text3); }
   .user-results-list { margin-top:12px; max-height:240px; overflow-y:auto; }
   .search-loading { text-align:center; padding:20px; color:var(--text3); font-size:13px; }
+
+  /* Selected members chips */
+  .selected-members {
+    display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; min-height:0;
+  }
+  .member-chip {
+    display:flex; align-items:center; gap:6px; padding:4px 10px 4px 6px;
+    background:rgba(99,102,241,0.15); border:1px solid rgba(99,102,241,0.3);
+    border-radius:20px; font-size:12px; color:var(--accent3);
+  }
+  .member-chip .avatar { width:22px; height:22px; font-size:9px; }
+  .member-chip-remove {
+    background:none; border:none; color:var(--text3); cursor:pointer; font-size:14px;
+    display:flex; align-items:center; padding:0; margin-left:2px;
+  }
+  .member-chip-remove:hover { color:var(--danger); }
+
+  /* Check badge on user result */
+  .check-badge {
+    width:22px; height:22px; border-radius:50%;
+    background:var(--accent); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0;
+  }
 
   /* ── PROFILE SETUP ── */
   #profile-screen {
@@ -454,13 +559,10 @@ alter publication supabase_realtime add table messages;
     display:flex; align-items:center; justify-content:center;
     font-size:32px; font-weight:700; color:#fff;
     position:relative; cursor:pointer; overflow:hidden;
-    border:3px solid var(--border2); transition:all 0.2s;
-    flex-shrink:0;
+    border:3px solid var(--border2); transition:all 0.2s; flex-shrink:0;
   }
   .avatar-upload-circle:hover .avatar-upload-overlay { opacity:1; }
-  .avatar-upload-circle img {
-    width:100%; height:100%; object-fit:cover; position:absolute; inset:0;
-  }
+  .avatar-upload-circle img { width:100%; height:100%; object-fit:cover; position:absolute; inset:0; }
   .avatar-upload-overlay {
     position:absolute; inset:0; background:rgba(0,0,0,0.55);
     display:flex; align-items:center; justify-content:center;
@@ -468,6 +570,14 @@ alter publication supabase_realtime add table messages;
   }
   .avatar-upload-hint { font-size:12px; color:var(--text3); }
   #avatar-file-input { display:none; }
+
+  /* Group color picker */
+  .color-picker-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .color-swatch {
+    width:28px; height:28px; border-radius:50%; cursor:pointer;
+    border:2px solid transparent; transition:all 0.2s; flex-shrink:0;
+  }
+  .color-swatch.selected { border-color:#fff; transform:scale(1.15); }
 
   /* ── TOAST ── */
   .toast {
@@ -488,6 +598,29 @@ alter publication supabase_realtime add table messages;
   @keyframes spin { to { transform:rotate(360deg); } }
 
   .hidden { display:none !important; }
+
+  /* ── INVITE LINK SECTION ── */
+  .invite-link-box {
+    background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; display:flex; align-items:center; gap:8px; margin-top:12px;
+  }
+  .invite-link-text {
+    flex:1; font-size:12px; color:var(--text2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .invite-copy-btn {
+    background:var(--accent); border:none; color:#fff; border-radius:7px;
+    padding:5px 10px; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer;
+    transition:all 0.2s; flex-shrink:0;
+  }
+  .invite-copy-btn:hover { background:var(--accent2); }
+
+  /* Group badge on avatar */
+  .group-badge {
+    position:absolute; bottom:-2px; right:-2px;
+    width:14px; height:14px; border-radius:3px;
+    background:var(--teal); font-size:8px; display:flex; align-items:center; justify-content:center;
+    border:2px solid var(--bg2); font-weight:700; color:#fff;
+  }
 </style>
 </head>
 <body>
@@ -561,7 +694,7 @@ alter publication supabase_realtime add table messages;
       <div class="form-group">
         <label class="form-label">Username</label>
         <div class="input-icon-wrap">
-          <span class="input-icon">@</span>
+          <span class="input-icon" style="font-size:14px;font-weight:700;">@</span>
           <input type="text" id="signup-username" class="form-input" placeholder="yourhandle" style="padding-left:38px;">
         </div>
         <div class="error-msg" id="signup-username-err">Username must be 3+ characters, letters/numbers only</div>
@@ -599,8 +732,6 @@ alter publication supabase_realtime add table messages;
     </div>
     <div class="auth-title">Set up your profile</div>
     <div class="auth-sub">Almost there! Just a few details.</div>
-
-    <!-- Avatar Upload -->
     <div class="avatar-upload-wrap">
       <div class="avatar-upload-circle" id="avatar-preview-circle" onclick="document.getElementById('avatar-file-input').click()">
         <span id="avatar-preview-initials">?</span>
@@ -609,7 +740,6 @@ alter publication supabase_realtime add table messages;
       <div class="avatar-upload-hint">Tap to upload profile photo</div>
       <input type="file" id="avatar-file-input" accept="image/*" onchange="handleAvatarSelect(event)">
     </div>
-
     <div class="form-group">
       <label class="form-label">Display Name</label>
       <input type="text" id="profile-name" class="form-input" placeholder="Your full name">
@@ -640,17 +770,28 @@ alter publication supabase_realtime add table messages;
     <div class="sidebar-spacer"></div>
     <button class="side-btn" title="Settings" onclick="showToast('⚙️ Settings coming soon!')">⚙️</button>
     <button class="side-btn" title="Sign Out" onclick="signOut()">🚪</button>
-    <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--pink));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff;cursor:pointer;margin-top:8px;" id="user-mini-avatar" title="My Profile"></div>
+    <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--pink));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff;cursor:pointer;margin-top:8px;overflow:hidden;" id="user-mini-avatar" title="My Profile"></div>
   </nav>
 
   <!-- Contacts Panel -->
   <div class="contacts-panel">
     <div class="panel-header">
       <div class="panel-title">
-        Messages
+        Inbox
         <div class="panel-actions">
-          <button class="icon-btn" title="New Chat" onclick="openNewChatModal()">✏️</button>
+          <button class="icon-btn" title="New Direct Message" onclick="openNewChatModal('dm')" style="font-size:14px;">✏️</button>
+          <button class="icon-btn" title="New Group" onclick="openNewChatModal('group')" style="font-size:14px;">👥</button>
         </div>
+      </div>
+      <!-- DM / Groups tabs -->
+      <div class="inbox-tabs" id="inbox-tabs">
+        <button class="inbox-tab active" id="tab-all" onclick="switchInboxTab('all')">All</button>
+        <button class="inbox-tab" id="tab-dm" onclick="switchInboxTab('dm')">
+          💬 DMs <span class="inbox-tab-badge" id="dm-badge">0</span>
+        </button>
+        <button class="inbox-tab" id="tab-group" onclick="switchInboxTab('group')">
+          👥 Groups <span class="inbox-tab-badge" id="group-badge">0</span>
+        </button>
       </div>
       <div class="search-wrap">
         <span class="search-icon">🔍</span>
@@ -674,18 +815,21 @@ alter publication supabase_realtime add table messages;
       <div class="welcome-screen" id="welcome-screen">
         <div class="welcome-hex">H</div>
         <div class="welcome-title">Start chatting</div>
-        <div class="welcome-sub">Select a conversation or start a new one with ✏️</div>
+        <div class="welcome-sub">Select a conversation or start a new one.<br><br>
+          <span style="color:var(--accent2)">✏️ DM</span> someone directly &nbsp;·&nbsp; <span style="color:var(--teal)">👥 Create</span> a group
+        </div>
       </div>
 
-      <!-- Active chat (hidden until conversation selected) -->
+      <!-- Active chat -->
       <div id="active-chat" class="hidden" style="display:flex;flex-direction:column;flex:1;">
         <div class="chat-header" id="chat-header">
-          <div class="avatar avatar-lg" id="chat-avatar"></div>
+          <div id="chat-avatar-wrap"></div>
           <div>
             <div class="chat-partner-name" id="chat-name"></div>
-            <div class="chat-partner-status"><span class="status-dot"></span><span id="chat-status">Online</span></div>
+            <div class="chat-partner-status" id="chat-status-line"></div>
           </div>
           <div class="chat-header-actions">
+            <button class="icon-btn" id="invite-btn" onclick="openInviteModal()" title="Invite to Group" style="display:none;">➕</button>
             <button class="icon-btn" onclick="showToast('📞 Calling…')">📞</button>
             <button class="icon-btn" onclick="showToast('📹 Video call coming soon!')">📹</button>
             <button class="icon-btn" onclick="toggleInfoPanel()">ℹ️</button>
@@ -719,10 +863,16 @@ alter publication supabase_realtime add table messages;
     <!-- Info Panel -->
     <div class="info-panel hidden" id="info-panel">
       <div class="info-profile">
-        <div class="info-avatar" id="info-avatar-txt"></div>
+        <div id="info-avatar-container"></div>
         <div class="info-name" id="info-name-txt"></div>
         <div class="info-email" id="info-email-txt"></div>
-        <div class="info-status"><span class="status-dot" style="background:var(--online);width:7px;height:7px;border-radius:50%;"></span> Online</div>
+        <div class="info-status" id="info-status-line"><span class="status-dot" style="background:var(--online);width:7px;height:7px;border-radius:50%;"></span> Online</div>
+      </div>
+      <!-- Group members section (shown only for groups) -->
+      <div class="info-section" id="info-members-section" style="display:none;">
+        <div class="info-section-title" id="info-members-title">Members</div>
+        <div id="info-members-list"></div>
+        <button class="info-action" style="margin-top:10px;" onclick="openInviteModal()"><span class="info-action-icon">➕</span> Add Members</button>
       </div>
       <div class="info-section">
         <div class="info-section-title">Shared Media</div>
@@ -737,10 +887,10 @@ alter publication supabase_realtime add table messages;
       </div>
       <div class="info-section">
         <div class="info-section-title">Actions</div>
-        <div class="info-action-btns">
+        <div class="info-action-btns" id="info-action-btns">
           <button class="info-action" onclick="showToast('🔕 Muted!')"><span class="info-action-icon">🔕</span> Mute Notifications</button>
           <button class="info-action" onclick="showToast('🔍 Searching…')"><span class="info-action-icon">🔍</span> Search in Chat</button>
-          <button class="info-action danger" onclick="showToast('🚫 User blocked')"><span class="info-action-icon">🚫</span> Block User</button>
+          <button class="info-action danger" id="info-danger-btn"><span class="info-action-icon">🚫</span> <span id="info-danger-label">Block User</span></button>
         </div>
       </div>
     </div>
@@ -751,15 +901,80 @@ alter publication supabase_realtime add table messages;
 <div class="modal-overlay hidden" id="new-chat-modal">
   <div class="modal">
     <button class="modal-close" onclick="closeNewChatModal()">✕</button>
-    <div class="modal-title">New Conversation</div>
-    <div class="modal-sub">Search by username or display name</div>
+    <div class="modal-title" id="new-chat-modal-title">New Conversation</div>
+    <div class="modal-sub" id="new-chat-modal-sub">Start a DM or create a group</div>
+
+    <!-- Tabs: DM / Group -->
+    <div class="modal-tabs" id="new-chat-modal-tabs">
+      <button class="modal-tab active" id="modal-tab-dm" onclick="switchModalTab('dm')">💬 Direct Message</button>
+      <button class="modal-tab" id="modal-tab-group" onclick="switchModalTab('group')">👥 New Group</button>
+    </div>
+
+    <!-- DM panel -->
+    <div id="modal-dm-panel">
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="user-search-input" placeholder="Search users…" oninput="searchUsers(this.value)" style="font-family:inherit;">
+      </div>
+      <div class="user-results-list" id="user-results-list">
+        <div class="search-loading">Start typing to search for users</div>
+      </div>
+    </div>
+
+    <!-- Group panel -->
+    <div id="modal-group-panel" class="hidden">
+      <div class="form-group">
+        <label class="form-label">Group Name</label>
+        <input type="text" id="group-name-input" class="form-input" placeholder="e.g. Weekend Squad">
+        <div class="error-msg" id="group-name-err">Group name must be at least 2 characters</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description (optional)</label>
+        <input type="text" id="group-desc-input" class="form-input" placeholder="What's this group about?">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Group Color</label>
+        <div class="color-picker-row" id="group-color-picker"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Add Members</label>
+        <div class="selected-members" id="group-selected-members"></div>
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="group-user-search" placeholder="Search to add members…" oninput="searchGroupUsers(this.value)" style="font-family:inherit;">
+        </div>
+        <div class="user-results-list" id="group-user-results">
+          <div class="search-loading">Search for people to add</div>
+        </div>
+      </div>
+      <button class="btn-primary" id="create-group-btn" onclick="createGroup()">Create Group 🚀</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ INVITE MEMBERS MODAL ══ -->
+<div class="modal-overlay hidden" id="invite-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeInviteModal()">✕</button>
+    <div class="modal-title">Invite to Group</div>
+    <div class="modal-sub" id="invite-modal-sub">Add more people to this group</div>
+    <div class="selected-members" id="invite-selected-members"></div>
     <div class="search-wrap">
       <span class="search-icon">🔍</span>
-      <input type="text" id="user-search-input" placeholder="Search users…" oninput="searchUsers(this.value)" style="font-family:inherit;">
+      <input type="text" id="invite-user-search" placeholder="Search users…" oninput="searchInviteUsers(this.value)" style="font-family:inherit;">
     </div>
-    <div class="user-results-list" id="user-results-list">
-      <div class="search-loading">Start typing to search for users</div>
+    <div class="user-results-list" id="invite-user-results">
+      <div class="search-loading">Search for people to invite</div>
     </div>
+    <!-- Invite link -->
+    <div style="margin-top:16px;">
+      <div class="form-label" style="display:block;margin-bottom:8px;">Or share invite link</div>
+      <div class="invite-link-box">
+        <span class="invite-link-text" id="invite-link-text">Generating link…</span>
+        <button class="invite-copy-btn" onclick="copyInviteLink()">Copy</button>
+      </div>
+    </div>
+    <button class="btn-primary" style="margin-top:16px;" id="invite-add-btn" onclick="addInviteMembers()">Add Selected Members</button>
   </div>
 </div>
 
@@ -780,13 +995,29 @@ const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // ══════════════════════════════════════════════
 let currentUser = null;
 let currentProfile = null;
-let activeConversation = null;
-let activeContact = null;
+let activeConversation = null;  // { id, type, name, other, members, avatar_color, created_by }
 let conversations = [];
 let realtimeChannel = null;
 let infoPanelOpen = false;
 let userSearchTimeout = null;
+let groupSearchTimeout = null;
+let inviteSearchTimeout = null;
 let selectedAvatarFile = null;
+let activeInboxTab = 'all';
+let currentModalTab = 'dm';
+let groupSelectedMembers = []; // [{id, display_name, initials, avatar_color}]
+let inviteSelectedMembers = [];
+let selectedGroupColor = 'linear-gradient(135deg,#6366f1,#14b8a6)';
+let currentGroupMembers = []; // members of open group
+
+const GROUP_COLORS = [
+  'linear-gradient(135deg,#6366f1,#14b8a6)',
+  'linear-gradient(135deg,#6366f1,#ec4899)',
+  'linear-gradient(135deg,#f59e0b,#ec4899)',
+  'linear-gradient(135deg,#22c55e,#14b8a6)',
+  'linear-gradient(135deg,#818cf8,#f59e0b)',
+  'linear-gradient(135deg,#ec4899,#14b8a6)',
+];
 
 const AVATAR_COLORS = [
   'linear-gradient(135deg,#6366f1,#ec4899)',
@@ -798,41 +1029,6 @@ const AVATAR_COLORS = [
 ];
 
 function randomColor() { return AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)]; }
-
-function handleAvatarSelect(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  if (file.size > 5 * 1024 * 1024) { showToast('❌ Image must be under 5MB'); return; }
-  selectedAvatarFile = file;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const circle = document.getElementById('avatar-preview-circle');
-    // Remove initials span, show image
-    let img = circle.querySelector('img');
-    if (!img) {
-      img = document.createElement('img');
-      circle.insertBefore(img, circle.firstChild);
-    }
-    img.src = e.target.result;
-    const initSpan = document.getElementById('avatar-preview-initials');
-    if (initSpan) initSpan.style.display = 'none';
-  };
-  reader.readAsDataURL(file);
-}
-
-async function uploadAvatar(userId) {
-  if (!selectedAvatarFile) return null;
-  const ext = selectedAvatarFile.name.split('.').pop();
-  const path = `${userId}/avatar.${ext}`;
-  const { error } = await db.storage.from('avatars').upload(path, selectedAvatarFile, { upsert: true });
-  if (error) { console.error('Avatar upload error:', error); return null; }
-  const { data } = db.storage.from('avatars').getPublicUrl(path);
-  return data.publicUrl + '?t=' + Date.now();
-}
-
-function initials(name) {
-  return name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
-}
 
 // ══════════════════════════════════════════════
 //  UI HELPERS
@@ -859,14 +1055,10 @@ function switchTab(tab) {
   document.getElementById('auth-sub').textContent = tab === 'login' ? 'Sign in to continue chatting' : 'Join Hexa Chat today';
 }
 
-function setLoading(btnId, loading) {
+function setLoading(btnId, loading, resetLabel) {
   const btn = document.getElementById(btnId);
-  if (loading) {
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>';
-  } else {
-    btn.disabled = false;
-  }
+  if (loading) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>'; }
+  else { btn.disabled = false; if (resetLabel) btn.textContent = resetLabel; }
 }
 
 function escHtml(s) {
@@ -889,6 +1081,57 @@ function formatRelTime(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
+function initials(name) {
+  return name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
+}
+
+function handleAvatarSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { showToast('❌ Image must be under 5MB'); return; }
+  selectedAvatarFile = file;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const circle = document.getElementById('avatar-preview-circle');
+    let img = circle.querySelector('img');
+    if (!img) { img = document.createElement('img'); circle.insertBefore(img, circle.firstChild); }
+    img.src = e.target.result;
+    const initSpan = document.getElementById('avatar-preview-initials');
+    if (initSpan) initSpan.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function uploadAvatar(userId) {
+  if (!selectedAvatarFile) return null;
+  const ext = selectedAvatarFile.name.split('.').pop();
+  const path = `${userId}/avatar.${ext}`;
+  const { error } = await db.storage.from('avatars').upload(path, selectedAvatarFile, { upsert: true });
+  if (error) { console.error('Avatar upload error:', error); return null; }
+  const { data } = db.storage.from('avatars').getPublicUrl(path);
+  return data.publicUrl + '?t=' + Date.now();
+}
+
+function avatarHtmlSmall(profile, showDot = false) {
+  if (profile.avatar_url) {
+    return `<div class="avatar" style="background:#1c2236;overflow:hidden;">
+      <img src="${escHtml(profile.avatar_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">
+      ${showDot ? '<span class="dot"></span>' : ''}
+    </div>`;
+  }
+  return `<div class="avatar" style="background:${profile.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
+    ${escHtml(profile.initials || '?')}
+    ${showDot ? '<span class="dot"></span>' : ''}
+  </div>`;
+}
+
+function groupAvatarHtml(conv, size='sm') {
+  const cls = size === 'lg' ? 'avatar-group avatar-group-lg' : 'avatar-group';
+  return `<div class="${cls}" style="background:${conv.avatar_color || 'linear-gradient(135deg,#6366f1,#14b8a6)'}">
+    #
+  </div>`;
+}
+
 // ══════════════════════════════════════════════
 //  AUTH
 // ══════════════════════════════════════════════
@@ -896,27 +1139,14 @@ async function handleLogin() {
   const email = document.getElementById('login-email').value.trim();
   const pass = document.getElementById('login-pass').value;
   let ok = true;
-
-  document.getElementById('login-email-err').classList.remove('show');
-  document.getElementById('login-pass-err').classList.remove('show');
-  document.getElementById('login-general-err').classList.remove('show');
-
+  ['login-email-err','login-pass-err','login-general-err'].forEach(id => document.getElementById(id).classList.remove('show'));
   if (!email.includes('@')) { document.getElementById('login-email-err').classList.add('show'); ok = false; }
   if (pass.length < 6) { document.getElementById('login-pass-err').classList.add('show'); ok = false; }
   if (!ok) return;
-
   setLoading('login-btn', true);
   const { data, error } = await db.auth.signInWithPassword({ email, password: pass });
-  setLoading('login-btn', false);
-  document.getElementById('login-btn').textContent = 'Sign In';
-
-  if (error) {
-    const el = document.getElementById('login-general-err');
-    el.textContent = error.message;
-    el.classList.add('show');
-    return;
-  }
-
+  setLoading('login-btn', false, 'Sign In');
+  if (error) { const el = document.getElementById('login-general-err'); el.textContent = error.message; el.classList.add('show'); return; }
   currentUser = data.user;
   await afterAuth();
 }
@@ -927,59 +1157,30 @@ async function handleSignup() {
   const email = document.getElementById('signup-email').value.trim();
   const pass = document.getElementById('signup-pass').value;
   let ok = true;
-
-  ['signup-name-err','signup-email-err','signup-pass-err','signup-username-err','signup-general-err']
-    .forEach(id => document.getElementById(id).classList.remove('show'));
-
+  ['signup-name-err','signup-email-err','signup-pass-err','signup-username-err','signup-general-err'].forEach(id => document.getElementById(id).classList.remove('show'));
   if (name.length < 2) { document.getElementById('signup-name-err').classList.add('show'); ok = false; }
   if (username.length < 3) { document.getElementById('signup-username-err').classList.add('show'); ok = false; }
   if (!email.includes('@')) { document.getElementById('signup-email-err').classList.add('show'); ok = false; }
   if (pass.length < 6) { document.getElementById('signup-pass-err').classList.add('show'); ok = false; }
   if (!ok) return;
-
   setLoading('signup-btn', true);
   const { data, error } = await db.auth.signUp({ email, password: pass });
-  setLoading('signup-btn', false);
-  document.getElementById('signup-btn').textContent = 'Create Account';
-
-  if (error) {
-    const el = document.getElementById('signup-general-err');
-    el.textContent = error.message;
-    el.classList.add('show');
-    return;
-  }
-
+  setLoading('signup-btn', false, 'Create Account');
+  if (error) { const el = document.getElementById('signup-general-err'); el.textContent = error.message; el.classList.add('show'); return; }
   currentUser = data.user;
-
-  // Create profile immediately
   const { error: pErr } = await db.from('profiles').insert({
-    id: currentUser.id,
-    username,
-    display_name: name,
-    initials: initials(name),
-    avatar_color: randomColor(),
+    id: currentUser.id, username, display_name: name,
+    initials: initials(name), avatar_color: randomColor(),
   });
-
   if (pErr && pErr.code === '23505') {
-    const el = document.getElementById('signup-username-err');
-    el.textContent = 'Username already taken';
-    el.classList.add('show');
-    return;
+    const el = document.getElementById('signup-username-err'); el.textContent = 'Username already taken'; el.classList.add('show'); return;
   }
-
   await afterAuth();
 }
 
 async function afterAuth() {
-  // Check if profile exists
   const { data: profile } = await db.from('profiles').select('*').eq('id', currentUser.id).single();
-
-  if (!profile) {
-    // Show profile setup
-    showProfileSetup();
-    return;
-  }
-
+  if (!profile) { showProfileSetup(); return; }
   currentProfile = profile;
   enterApp();
 }
@@ -993,43 +1194,20 @@ function showProfileSetup() {
 async function saveProfile() {
   const name = document.getElementById('profile-name').value.trim();
   const username = document.getElementById('profile-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g,'');
-
-  document.getElementById('profile-name-err').classList.remove('show');
-  document.getElementById('profile-username-err').classList.remove('show');
-  document.getElementById('profile-general-err').classList.remove('show');
-
+  ['profile-name-err','profile-username-err','profile-general-err'].forEach(id => document.getElementById(id).classList.remove('show'));
   if (name.length < 2) { document.getElementById('profile-name-err').classList.add('show'); return; }
   if (username.length < 3) { document.getElementById('profile-username-err').classList.add('show'); return; }
-
   setLoading('profile-btn', true);
-
-  // Upload avatar if selected
   const avatarUrl = await uploadAvatar(currentUser.id);
-
-  const profileData = {
-    id: currentUser.id,
-    username,
-    display_name: name,
-    initials: initials(name),
-    avatar_color: randomColor(),
-  };
+  const profileData = { id: currentUser.id, username, display_name: name, initials: initials(name), avatar_color: randomColor() };
   if (avatarUrl) profileData.avatar_url = avatarUrl;
-
   const { error } = await db.from('profiles').upsert(profileData, { onConflict: 'id' });
-  setLoading('profile-btn', false);
-  document.getElementById('profile-btn').textContent = 'Save & Continue →';
-
+  setLoading('profile-btn', false, 'Save & Continue →');
   if (error) {
-    if (error.code === '23505') {
-      document.getElementById('profile-username-err').textContent = 'Username already taken';
-      document.getElementById('profile-username-err').classList.add('show');
-    } else {
-      document.getElementById('profile-general-err').textContent = error.message;
-      document.getElementById('profile-general-err').classList.add('show');
-    }
+    if (error.code === '23505') { document.getElementById('profile-username-err').textContent = 'Username already taken'; document.getElementById('profile-username-err').classList.add('show'); }
+    else { document.getElementById('profile-general-err').textContent = error.message; document.getElementById('profile-general-err').classList.add('show'); }
     return;
   }
-
   const { data: profile } = await db.from('profiles').select('*').eq('id', currentUser.id).single();
   currentProfile = profile;
   document.getElementById('profile-screen').style.display = 'none';
@@ -1039,8 +1217,8 @@ async function saveProfile() {
 async function signOut() {
   if (realtimeChannel) db.removeChannel(realtimeChannel);
   await db.auth.signOut();
-  currentUser = null; currentProfile = null; activeConversation = null; activeContact = null;
-  conversations = [];
+  currentUser = null; currentProfile = null; activeConversation = null;
+  conversations = []; groupSelectedMembers = []; inviteSelectedMembers = [];
   document.getElementById('app-screen').classList.remove('visible');
   document.getElementById('auth-screen').style.display = 'flex';
   document.getElementById('login-email').value = '';
@@ -1048,8 +1226,14 @@ async function signOut() {
   switchTab('login');
 }
 
+document.getElementById('profile-name').addEventListener('input', function() {
+  const val = this.value.trim();
+  const span = document.getElementById('avatar-preview-initials');
+  if (span && !selectedAvatarFile) span.textContent = val ? initials(val) : '?';
+});
+
 // ══════════════════════════════════════════════
-//  APP
+//  APP INIT
 // ══════════════════════════════════════════════
 function enterApp() {
   document.getElementById('auth-screen').style.display = 'none';
@@ -1058,16 +1242,28 @@ function enterApp() {
 
   const miniAvatar = document.getElementById('user-mini-avatar');
   if (currentProfile.avatar_url) {
-    miniAvatar.innerHTML = `<img src="${currentProfile.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
-    miniAvatar.textContent = '';
+    miniAvatar.innerHTML = `<img src="${escHtml(currentProfile.avatar_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
   } else {
     miniAvatar.textContent = currentProfile.initials;
   }
   loadConversations();
 }
 
+// ══════════════════════════════════════════════
+//  INBOX TABS
+// ══════════════════════════════════════════════
+function switchInboxTab(tab) {
+  activeInboxTab = tab;
+  ['all','dm','group'].forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === tab);
+  });
+  filterContacts(document.querySelector('.contacts-panel .search-wrap input').value || '');
+}
+
+// ══════════════════════════════════════════════
+//  LOAD CONVERSATIONS
+// ══════════════════════════════════════════════
 async function loadConversations() {
-  // Get all conversations where current user is participant
   const { data: participantRows } = await db
     .from('conversation_participants')
     .select('conversation_id')
@@ -1080,32 +1276,55 @@ async function loadConversations() {
 
   const convIds = participantRows.map(r => r.conversation_id);
 
-  // For each conversation, get the other participant's profile + last message
+  // Fetch conversation details
+  const { data: convData } = await db
+    .from('conversations')
+    .select('*')
+    .in('id', convIds);
+
+  if (!convData) { renderConversationsEmpty(); return; }
+
   const convList = [];
-  for (const convId of convIds) {
-    const { data: parts } = await db
-      .from('conversation_participants')
-      .select('user_id, profiles(*)')
-      .eq('conversation_id', convId)
-      .neq('user_id', currentProfile.id);
 
-    const other = parts?.[0]?.profiles;
-    if (!other) continue;
-
+  for (const conv of convData) {
+    // Get last message
     const { data: msgs } = await db
       .from('messages')
-      .select('content, created_at')
-      .eq('conversation_id', convId)
+      .select('content, created_at, sender_id')
+      .eq('conversation_id', conv.id)
       .order('created_at', { ascending: false })
       .limit(1);
 
     const lastMsg = msgs?.[0];
-    convList.push({
-      id: convId,
-      other,
-      lastMessage: lastMsg?.content || 'Start a conversation',
-      lastTime: lastMsg?.created_at || null,
-    });
+
+    if (conv.type === 'dm') {
+      // Get the other participant
+      const { data: parts } = await db
+        .from('conversation_participants')
+        .select('user_id, profiles(*)')
+        .eq('conversation_id', conv.id)
+        .neq('user_id', currentProfile.id);
+      const other = parts?.[0]?.profiles;
+      if (!other) continue;
+      convList.push({
+        id: conv.id, type: 'dm',
+        name: other.display_name, other,
+        avatar_color: other.avatar_color,
+        lastMessage: lastMsg?.content || 'Start a conversation',
+        lastTime: lastMsg?.created_at || null,
+      });
+    } else {
+      // Group
+      convList.push({
+        id: conv.id, type: 'group',
+        name: conv.name || 'Group',
+        description: conv.description,
+        avatar_color: conv.avatar_color,
+        created_by: conv.created_by,
+        lastMessage: lastMsg?.content || 'No messages yet',
+        lastTime: lastMsg?.created_at || null,
+      });
+    }
   }
 
   convList.sort((a, b) => {
@@ -1115,7 +1334,18 @@ async function loadConversations() {
   });
 
   conversations = convList;
-  renderContactsList(conversations);
+
+  // Update badges
+  const dmCount = convList.filter(c => c.type === 'dm').length;
+  const grpCount = convList.filter(c => c.type === 'group').length;
+  const dmBadge = document.getElementById('dm-badge');
+  const grpBadge = document.getElementById('group-badge');
+  dmBadge.textContent = dmCount;
+  grpBadge.textContent = grpCount;
+  dmBadge.classList.toggle('show', dmCount > 0);
+  grpBadge.classList.toggle('show', grpCount > 0);
+
+  filterContacts('');
 }
 
 function renderConversationsEmpty() {
@@ -1123,45 +1353,54 @@ function renderConversationsEmpty() {
     <div class="contacts-empty">
       <div class="empty-icon">✏️</div>
       <div>No conversations yet</div>
-      <div style="margin-top:6px;font-size:12px;">Click ✏️ to start chatting</div>
+      <div style="margin-top:6px;font-size:12px;">Start a DM ✏️ or create a Group 👥</div>
     </div>`;
-}
-
-function avatarHtmlSmall(profile, showDot = false) {
-  if (profile.avatar_url) {
-    return `<div class="avatar" style="background:#1c2236;overflow:hidden;">
-      <img src="${profile.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">
-      ${showDot ? '<span class="dot"></span>' : ''}
-    </div>`;
-  }
-  return `<div class="avatar" style="background:${profile.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
-    ${escHtml(profile.initials)}
-    ${showDot ? '<span class="dot"></span>' : ''}
-  </div>`;
 }
 
 function renderContactsList(list) {
-  if (!list || list.length === 0) { renderConversationsEmpty(); return; }
-  document.getElementById('contacts-list').innerHTML = list.map(c => `
-    <div class="contact-item ${activeConversation === c.id ? 'active' : ''}" onclick="openConversation('${c.id}')">
-      ${avatarHtmlSmall(c.other, true)}
+  if (!list || list.length === 0) {
+    document.getElementById('contacts-list').innerHTML = `
+      <div class="contacts-empty">
+        <div class="empty-icon">${activeInboxTab === 'group' ? '👥' : '💬'}</div>
+        <div>${activeInboxTab === 'group' ? 'No groups yet' : activeInboxTab === 'dm' ? 'No DMs yet' : 'No conversations'}</div>
+      </div>`;
+    return;
+  }
+
+  document.getElementById('contacts-list').innerHTML = list.map(c => {
+    const isGroup = c.type === 'group';
+    const avatarHtml = isGroup
+      ? `<div style="position:relative;flex-shrink:0;">
+           <div class="avatar-group" style="background:${c.avatar_color || 'linear-gradient(135deg,#6366f1,#14b8a6)'}">#</div>
+         </div>`
+      : avatarHtmlSmall(c.other, true);
+
+    return `<div class="contact-item ${activeConversation?.id === c.id ? 'active' : ''}" onclick="openConversation('${c.id}')">
+      ${avatarHtml}
       <div class="contact-info">
-        <div class="contact-name">${escHtml(c.other.display_name)}</div>
+        <div class="contact-name">${escHtml(c.name)}</div>
         <div class="contact-last">${escHtml(c.lastMessage)}</div>
       </div>
       <div class="contact-meta">
         <div class="contact-time">${c.lastTime ? formatRelTime(c.lastTime) : ''}</div>
+        <span class="contact-type-tag ${isGroup ? 'group' : 'dm'}">${isGroup ? 'Group' : 'DM'}</span>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function filterContacts(v) {
-  const filtered = conversations.filter(c =>
-    c.other.display_name.toLowerCase().includes(v.toLowerCase()) ||
-    c.other.username.toLowerCase().includes(v.toLowerCase())
-  );
-  renderContactsList(filtered);
+  let list = conversations;
+  if (activeInboxTab === 'dm') list = list.filter(c => c.type === 'dm');
+  else if (activeInboxTab === 'group') list = list.filter(c => c.type === 'group');
+  if (v) {
+    const lv = v.toLowerCase();
+    list = list.filter(c =>
+      c.name.toLowerCase().includes(lv) ||
+      (c.other?.username || '').toLowerCase().includes(lv)
+    );
+  }
+  renderContactsList(list);
 }
 
 // ══════════════════════════════════════════════
@@ -1171,56 +1410,178 @@ async function openConversation(convId) {
   const conv = conversations.find(c => c.id === convId);
   if (!conv) return;
 
-  activeConversation = convId;
-  activeContact = conv.other;
+  activeConversation = conv;
 
-  // Remove old realtime channel
   if (realtimeChannel) { db.removeChannel(realtimeChannel); realtimeChannel = null; }
 
-  // Update UI
   document.getElementById('welcome-screen').classList.add('hidden');
   const activeChat = document.getElementById('active-chat');
   activeChat.classList.remove('hidden');
   activeChat.style.display = 'flex';
 
-  // Update chat header avatar
-  const chatAvatar = document.getElementById('chat-avatar');
-  if (conv.other.avatar_url) {
-    chatAvatar.innerHTML = `<img src="${conv.other.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
-    chatAvatar.style.background = '#1c2236';
-  } else {
-    chatAvatar.textContent = conv.other.initials;
-    chatAvatar.style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
-  }
-  document.getElementById('chat-name').textContent = conv.other.display_name;
-  document.getElementById('chat-status').textContent = '@' + conv.other.username;
+  const isGroup = conv.type === 'group';
 
-  // Info panel avatar
-  const infoAvatar = document.getElementById('info-avatar-txt');
-  if (conv.other.avatar_url) {
-    infoAvatar.innerHTML = `<img src="${conv.other.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
-    infoAvatar.style.background = '#1c2236';
+  // Update chat header
+  const avatarWrap = document.getElementById('chat-avatar-wrap');
+  if (isGroup) {
+    avatarWrap.innerHTML = `<div class="avatar-group avatar-group-lg" style="background:${conv.avatar_color || 'linear-gradient(135deg,#6366f1,#14b8a6)'}">#</div>`;
   } else {
-    infoAvatar.textContent = conv.other.initials;
-    infoAvatar.style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
+    const av = conv.other;
+    if (av.avatar_url) {
+      avatarWrap.innerHTML = `<div class="avatar avatar-lg" style="background:#1c2236;overflow:hidden;"><img src="${escHtml(av.avatar_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"></div>`;
+    } else {
+      avatarWrap.innerHTML = `<div class="avatar avatar-lg" style="background:${av.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">${escHtml(av.initials)}</div>`;
+    }
   }
-  document.getElementById('info-name-txt').textContent = conv.other.display_name;
-  document.getElementById('info-email-txt').textContent = '@' + conv.other.username;
 
-  renderContactsList(conversations); // refresh active state
+  document.getElementById('chat-name').textContent = conv.name;
+  const statusLine = document.getElementById('chat-status-line');
+  if (isGroup) {
+    statusLine.className = 'chat-partner-status';
+    statusLine.innerHTML = `<span style="color:var(--teal)">👥 Group</span>`;
+    document.getElementById('invite-btn').style.display = 'flex';
+  } else {
+    statusLine.className = 'chat-partner-status online';
+    statusLine.innerHTML = `<span class="status-dot"></span> @${escHtml(conv.other.username)}`;
+    document.getElementById('invite-btn').style.display = 'none';
+  }
+
+  // Update info panel
+  updateInfoPanel(conv);
+
+  filterContacts('');
   await loadMessages(convId);
   subscribeToMessages(convId);
+
+  if (isGroup) {
+    await loadGroupMembers(convId);
+  }
 }
 
+async function loadGroupMembers(convId) {
+  const { data } = await db
+    .from('conversation_participants')
+    .select('user_id, role, profiles(*)')
+    .eq('conversation_id', convId);
+
+  currentGroupMembers = (data || []).map(r => ({ ...r.profiles, role: r.role }));
+  renderGroupMembersInInfo();
+
+  const statusLine = document.getElementById('chat-status-line');
+  statusLine.innerHTML = `<span style="color:var(--teal)">👥 ${currentGroupMembers.length} members</span>`;
+}
+
+function renderGroupMembersInInfo() {
+  document.getElementById('info-members-section').style.display = 'block';
+  document.getElementById('info-members-title').textContent = `Members (${currentGroupMembers.length})`;
+
+  document.getElementById('info-members-list').innerHTML = currentGroupMembers.map(m => `
+    <div class="member-item">
+      ${avatarHtmlSmall(m, false)}
+      <div class="member-info">
+        <div class="member-name">${escHtml(m.display_name)}</div>
+        <div class="member-username">@${escHtml(m.username)}</div>
+      </div>
+      ${m.role === 'admin' ? '<span class="member-role">Admin</span>' : ''}
+    </div>
+  `).join('');
+}
+
+function updateInfoPanel(conv) {
+  const isGroup = conv.type === 'group';
+  const container = document.getElementById('info-avatar-container');
+
+  if (isGroup) {
+    container.innerHTML = `<div class="info-avatar-group" style="background:${conv.avatar_color || 'linear-gradient(135deg,#6366f1,#14b8a6)'}">#</div>`;
+    document.getElementById('info-members-section').style.display = 'block';
+    document.getElementById('info-danger-label').textContent = 'Leave Group';
+    document.getElementById('info-danger-btn').onclick = () => leaveGroup(conv.id);
+  } else {
+    const av = conv.other;
+    if (av.avatar_url) {
+      container.innerHTML = `<div class="info-avatar" style="background:#1c2236;overflow:hidden;"><img src="${escHtml(av.avatar_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"></div>`;
+    } else {
+      container.innerHTML = `<div class="info-avatar" style="background:${av.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">${escHtml(av.initials)}</div>`;
+    }
+    document.getElementById('info-members-section').style.display = 'none';
+    document.getElementById('info-danger-label').textContent = 'Block User';
+    document.getElementById('info-danger-btn').onclick = () => showToast('🚫 User blocked');
+  }
+
+  document.getElementById('info-name-txt').textContent = conv.name;
+  document.getElementById('info-email-txt').textContent = isGroup
+    ? (conv.description || 'Group chat')
+    : '@' + conv.other.username;
+  document.getElementById('info-status-line').style.display = isGroup ? 'none' : 'flex';
+}
+
+// ══════════════════════════════════════════════
+//  MESSAGES
+// ══════════════════════════════════════════════
 async function loadMessages(convId) {
   const { data: msgs, error } = await db
     .from('messages')
     .select('id, content, sender_id, created_at')
     .eq('conversation_id', convId)
     .order('created_at', { ascending: true });
-
   if (error) { console.error(error); return; }
-  renderMessages(msgs || []);
+
+  if (activeConversation?.type === 'group') {
+    // Need sender profiles for group messages
+    await renderGroupMessages(msgs || []);
+  } else {
+    renderMessages(msgs || []);
+  }
+}
+
+async function renderGroupMessages(msgs) {
+  const area = document.getElementById('messages-area');
+  if (!msgs.length) {
+    area.innerHTML = `<div style="text-align:center;color:var(--text3);font-size:13px;padding:40px 0;">No messages yet. Say hello! 👋</div>`;
+    return;
+  }
+
+  // Collect unique sender IDs (excluding self)
+  const senderIds = [...new Set(msgs.map(m => m.sender_id).filter(id => id !== currentProfile.id))];
+  const senderMap = {};
+  if (senderIds.length) {
+    const { data: profiles } = await db.from('profiles').select('id, display_name, initials, avatar_color, avatar_url').in('id', senderIds);
+    (profiles || []).forEach(p => senderMap[p.id] = p);
+  }
+
+  let html = '<div class="date-divider">Today</div>';
+  let lastSender = null;
+
+  msgs.forEach((m, i) => {
+    const isMine = m.sender_id === currentProfile.id;
+    const sameSender = lastSender === m.sender_id;
+    if (!sameSender && i > 0) html += '<div class="msg-group-spacer"></div>';
+    lastSender = m.sender_id;
+
+    const senderProfile = isMine ? currentProfile : senderMap[m.sender_id];
+    const senderName = senderProfile?.display_name || 'Unknown';
+
+    let avatarHtml = '';
+    if (!isMine) {
+      if (!sameSender) {
+        avatarHtml = `<div class="msg-avatar">${avatarHtmlSmall(senderProfile || { initials:'?', avatar_color:'linear-gradient(135deg,#6366f1,#ec4899)' })}</div>`;
+      } else {
+        avatarHtml = '<div style="width:38px;flex-shrink:0"></div>';
+      }
+    }
+
+    html += `<div class="msg-row ${isMine ? 'mine' : ''}">
+      ${avatarHtml}
+      <div>
+        ${!isMine && !sameSender ? `<div class="msg-sender-name">${escHtml(senderName)}</div>` : ''}
+        <div class="msg-bubble">${escHtml(m.content)}</div>
+        <div class="msg-time">${formatTime(m.created_at)}${isMine ? '<span class="read-tick">✓✓</span>' : ''}</div>
+      </div>
+    </div>`;
+  });
+
+  area.innerHTML = html;
+  area.scrollTop = area.scrollHeight;
 }
 
 function renderMessages(msgs) {
@@ -1239,9 +1600,11 @@ function renderMessages(msgs) {
     if (!sameSender && i > 0) html += '<div class="msg-group-spacer"></div>';
     lastSender = m.sender_id;
 
+    const conv = activeConversation;
+    const otherProfile = conv?.other;
     const avatarHtml = !isMine && !sameSender
-      ? `<div class="msg-avatar"><div class="avatar" style="background:${activeContact?.avatar_url ? '#1c2236' : (activeContact?.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)')};overflow:hidden;">${activeContact?.avatar_url ? `<img src="${activeContact.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` : escHtml(activeContact?.initials || '?')}</div></div>`
-      : (!isMine ? '<div style="width:28px;flex-shrink:0"></div>' : '');
+      ? `<div class="msg-avatar">${avatarHtmlSmall(otherProfile || {initials:'?',avatar_color:'linear-gradient(135deg,#6366f1,#ec4899)'})}</div>`
+      : (!isMine ? '<div style="width:38px;flex-shrink:0"></div>' : '');
 
     html += `<div class="msg-row ${isMine ? 'mine' : ''}">
       ${avatarHtml}
@@ -1259,54 +1622,76 @@ function renderMessages(msgs) {
 function subscribeToMessages(convId) {
   realtimeChannel = db.channel('messages:' + convId)
     .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'messages',
+      event: 'INSERT', schema: 'public', table: 'messages',
       filter: `conversation_id=eq.${convId}`,
     }, async () => {
       await loadMessages(convId);
-      // Update last message in conversations
       await loadConversations();
     })
     .subscribe();
 }
 
-// ══════════════════════════════════════════════
-//  SEND MESSAGE
-// ══════════════════════════════════════════════
 async function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if (!text || !activeConversation) return;
   input.value = '';
-
   const { error } = await db.from('messages').insert({
-    conversation_id: activeConversation,
+    conversation_id: activeConversation.id,
     sender_id: currentProfile.id,
     content: text,
   });
-
-  if (error) {
-    showToast('❌ Failed to send message');
-    input.value = text;
-    console.error(error);
-  }
+  if (error) { showToast('❌ Failed to send message'); input.value = text; console.error(error); }
 }
 
 // ══════════════════════════════════════════════
 //  NEW CHAT MODAL
 // ══════════════════════════════════════════════
-function openNewChatModal() {
+function openNewChatModal(defaultTab = 'dm') {
   document.getElementById('new-chat-modal').classList.remove('hidden');
   document.getElementById('user-search-input').value = '';
   document.getElementById('user-results-list').innerHTML = '<div class="search-loading">Start typing to search for users</div>';
-  setTimeout(() => document.getElementById('user-search-input').focus(), 100);
+  groupSelectedMembers = [];
+  document.getElementById('group-selected-members').innerHTML = '';
+  document.getElementById('group-user-results').innerHTML = '<div class="search-loading">Search for people to add</div>';
+  document.getElementById('group-user-search').value = '';
+  document.getElementById('group-name-input').value = '';
+  document.getElementById('group-desc-input').value = '';
+  document.getElementById('group-name-err').classList.remove('show');
+  renderColorPicker();
+  switchModalTab(defaultTab);
+  setTimeout(() => {
+    const inp = defaultTab === 'group' ? document.getElementById('group-name-input') : document.getElementById('user-search-input');
+    inp.focus();
+  }, 100);
 }
 
 function closeNewChatModal() {
   document.getElementById('new-chat-modal').classList.add('hidden');
 }
 
+function switchModalTab(tab) {
+  currentModalTab = tab;
+  document.getElementById('modal-tab-dm').classList.toggle('active', tab === 'dm');
+  document.getElementById('modal-tab-group').classList.toggle('active', tab === 'group');
+  document.getElementById('modal-dm-panel').classList.toggle('hidden', tab !== 'dm');
+  document.getElementById('modal-group-panel').classList.toggle('hidden', tab !== 'group');
+}
+
+function renderColorPicker() {
+  selectedGroupColor = GROUP_COLORS[0];
+  document.getElementById('group-color-picker').innerHTML = GROUP_COLORS.map((c, i) =>
+    `<div class="color-swatch ${i===0?'selected':''}" style="background:${c}" onclick="selectGroupColor(this,'${c}')"></div>`
+  ).join('');
+}
+
+function selectGroupColor(el, color) {
+  document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedGroupColor = color;
+}
+
+// User search (DM)
 function searchUsers(query) {
   clearTimeout(userSearchTimeout);
   if (!query.trim()) {
@@ -1314,10 +1699,10 @@ function searchUsers(query) {
     return;
   }
   document.getElementById('user-results-list').innerHTML = '<div class="search-loading">Searching…</div>';
-  userSearchTimeout = setTimeout(() => doSearchUsers(query.trim()), 350);
+  userSearchTimeout = setTimeout(() => doSearchUsers(query.trim(), 'user-results-list', (uid) => startConversation(uid)), 350);
 }
 
-async function doSearchUsers(query) {
+async function doSearchUsers(query, listId, onClickFn, excludeIds = []) {
   const { data, error } = await db
     .from('profiles')
     .select('id, display_name, username, initials, avatar_color')
@@ -1325,13 +1710,16 @@ async function doSearchUsers(query) {
     .neq('id', currentProfile.id)
     .limit(10);
 
-  if (error || !data || data.length === 0) {
-    document.getElementById('user-results-list').innerHTML = '<div class="search-loading">No users found</div>';
+  let results = data || [];
+  if (excludeIds.length) results = results.filter(u => !excludeIds.includes(u.id));
+
+  if (error || results.length === 0) {
+    document.getElementById(listId).innerHTML = '<div class="search-loading">No users found</div>';
     return;
   }
 
-  document.getElementById('user-results-list').innerHTML = data.map(u => `
-    <div class="user-result" onclick="startConversation('${u.id}')">
+  document.getElementById(listId).innerHTML = results.map(u => `
+    <div class="user-result" onclick="${onClickFn}('${u.id}')">
       <div class="avatar" style="background:${u.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
         ${escHtml(u.initials)}
       </div>
@@ -1345,47 +1733,254 @@ async function doSearchUsers(query) {
 
 async function startConversation(otherUserId) {
   closeNewChatModal();
-
-  // Check if conversation already exists
-  const { data: myConvs } = await db
-    .from('conversation_participants')
-    .select('conversation_id')
-    .eq('user_id', currentProfile.id);
-
+  const { data: myConvs } = await db.from('conversation_participants').select('conversation_id').eq('user_id', currentProfile.id);
   const myConvIds = (myConvs || []).map(r => r.conversation_id);
 
   if (myConvIds.length > 0) {
-    const { data: shared } = await db
-      .from('conversation_participants')
-      .select('conversation_id')
-      .eq('user_id', otherUserId)
-      .in('conversation_id', myConvIds);
-
-    if (shared && shared.length > 0) {
-      // Conversation exists — open it
-      await loadConversations();
-      openConversation(shared[0].conversation_id);
-      return;
+    // Only check DM conversations
+    const { data: dmConvs } = await db.from('conversations').select('id').eq('type','dm').in('id', myConvIds);
+    const dmIds = (dmConvs || []).map(c => c.id);
+    if (dmIds.length > 0) {
+      const { data: shared } = await db.from('conversation_participants').select('conversation_id').eq('user_id', otherUserId).in('conversation_id', dmIds);
+      if (shared && shared.length > 0) {
+        await loadConversations();
+        openConversation(shared[0].conversation_id);
+        return;
+      }
     }
   }
 
-  // Create new conversation
-  const { data: conv, error: convErr } = await db
-    .from('conversations')
-    .insert({})
-    .select()
-    .single();
-
+  const { data: conv, error: convErr } = await db.from('conversations').insert({ type: 'dm', created_by: currentProfile.id }).select().single();
   if (convErr) { showToast('❌ Could not create conversation'); return; }
-
-  // Add both participants
   await db.from('conversation_participants').insert([
-    { conversation_id: conv.id, user_id: currentProfile.id },
-    { conversation_id: conv.id, user_id: otherUserId },
+    { conversation_id: conv.id, user_id: currentProfile.id, role: 'admin' },
+    { conversation_id: conv.id, user_id: otherUserId, role: 'member' },
   ]);
-
   await loadConversations();
   openConversation(conv.id);
+}
+
+// ══════════════════════════════════════════════
+//  GROUP CREATION
+// ══════════════════════════════════════════════
+function searchGroupUsers(query) {
+  clearTimeout(groupSearchTimeout);
+  if (!query.trim()) {
+    document.getElementById('group-user-results').innerHTML = '<div class="search-loading">Search for people to add</div>';
+    return;
+  }
+  document.getElementById('group-user-results').innerHTML = '<div class="search-loading">Searching…</div>';
+  groupSearchTimeout = setTimeout(() => doGroupUserSearch(query.trim()), 350);
+}
+
+async function doGroupUserSearch(query) {
+  const excludeIds = groupSelectedMembers.map(m => m.id);
+  const { data } = await db
+    .from('profiles')
+    .select('id, display_name, username, initials, avatar_color')
+    .or(`username.ilike.%${query}%,display_name.ilike.%${query}%`)
+    .neq('id', currentProfile.id)
+    .limit(10);
+
+  const results = (data || []).filter(u => !excludeIds.includes(u.id));
+
+  if (!results.length) {
+    document.getElementById('group-user-results').innerHTML = '<div class="search-loading">No users found</div>';
+    return;
+  }
+
+  document.getElementById('group-user-results').innerHTML = results.map(u => `
+    <div class="user-result" onclick="addGroupMember('${u.id}','${escHtml(u.display_name)}','${escHtml(u.initials)}','${u.avatar_color || ''}')">
+      <div class="avatar" style="background:${u.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
+        ${escHtml(u.initials)}
+      </div>
+      <div class="user-result-info">
+        <div class="user-result-name">${escHtml(u.display_name)}</div>
+        <div class="user-result-username">@${escHtml(u.username)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function addGroupMember(id, displayName, ini, color) {
+  if (groupSelectedMembers.find(m => m.id === id)) return;
+  groupSelectedMembers.push({ id, display_name: displayName, initials: ini, avatar_color: color });
+  renderGroupSelectedMembers();
+  // Clear search
+  document.getElementById('group-user-search').value = '';
+  document.getElementById('group-user-results').innerHTML = '<div class="search-loading">Search for more people</div>';
+}
+
+function removeGroupMember(id) {
+  groupSelectedMembers = groupSelectedMembers.filter(m => m.id !== id);
+  renderGroupSelectedMembers();
+}
+
+function renderGroupSelectedMembers() {
+  document.getElementById('group-selected-members').innerHTML = groupSelectedMembers.map(m => `
+    <div class="member-chip">
+      <div class="avatar" style="width:22px;height:22px;font-size:9px;background:${m.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">${escHtml(m.initials)}</div>
+      ${escHtml(m.display_name)}
+      <button class="member-chip-remove" onclick="removeGroupMember('${m.id}')">×</button>
+    </div>
+  `).join('');
+}
+
+async function createGroup() {
+  const name = document.getElementById('group-name-input').value.trim();
+  const desc = document.getElementById('group-desc-input').value.trim();
+  document.getElementById('group-name-err').classList.remove('show');
+  if (name.length < 2) { document.getElementById('group-name-err').classList.add('show'); return; }
+
+  setLoading('create-group-btn', true);
+
+  const { data: conv, error } = await db.from('conversations').insert({
+    type: 'group',
+    name,
+    description: desc || null,
+    avatar_color: selectedGroupColor,
+    created_by: currentProfile.id,
+  }).select().single();
+
+  if (error) { showToast('❌ Could not create group'); setLoading('create-group-btn', false, 'Create Group 🚀'); return; }
+
+  // Add creator + selected members
+  const participants = [
+    { conversation_id: conv.id, user_id: currentProfile.id, role: 'admin' },
+    ...groupSelectedMembers.map(m => ({ conversation_id: conv.id, user_id: m.id, role: 'member' })),
+  ];
+  await db.from('conversation_participants').insert(participants);
+
+  setLoading('create-group-btn', false, 'Create Group 🚀');
+  closeNewChatModal();
+  showToast(`✅ Group "${name}" created!`);
+  await loadConversations();
+  openConversation(conv.id);
+}
+
+// ══════════════════════════════════════════════
+//  INVITE MEMBERS MODAL
+// ══════════════════════════════════════════════
+async function openInviteModal() {
+  if (!activeConversation || activeConversation.type !== 'group') return;
+  inviteSelectedMembers = [];
+  document.getElementById('invite-selected-members').innerHTML = '';
+  document.getElementById('invite-user-results').innerHTML = '<div class="search-loading">Search for people to invite</div>';
+  document.getElementById('invite-user-search').value = '';
+  document.getElementById('invite-modal-sub').textContent = `Add people to "${activeConversation.name}"`;
+  // Generate invite link (encoded group ID)
+  const link = `${window.location.origin}${window.location.pathname}?join=${activeConversation.id}`;
+  document.getElementById('invite-link-text').textContent = link;
+  document.getElementById('invite-modal').classList.remove('hidden');
+}
+
+function closeInviteModal() {
+  document.getElementById('invite-modal').classList.add('hidden');
+}
+
+function copyInviteLink() {
+  const link = document.getElementById('invite-link-text').textContent;
+  navigator.clipboard.writeText(link).then(() => showToast('📋 Invite link copied!')).catch(() => showToast('❌ Could not copy'));
+}
+
+function searchInviteUsers(query) {
+  clearTimeout(inviteSearchTimeout);
+  if (!query.trim()) {
+    document.getElementById('invite-user-results').innerHTML = '<div class="search-loading">Search for people to invite</div>';
+    return;
+  }
+  document.getElementById('invite-user-results').innerHTML = '<div class="search-loading">Searching…</div>';
+  inviteSearchTimeout = setTimeout(() => doInviteUserSearch(query.trim()), 350);
+}
+
+async function doInviteUserSearch(query) {
+  const currentMemberIds = currentGroupMembers.map(m => m.id);
+  const selectedIds = inviteSelectedMembers.map(m => m.id);
+  const excludeIds = [...new Set([...currentMemberIds, ...selectedIds, currentProfile.id])];
+
+  const { data } = await db
+    .from('profiles')
+    .select('id, display_name, username, initials, avatar_color')
+    .or(`username.ilike.%${query}%,display_name.ilike.%${query}%`)
+    .limit(15);
+
+  const results = (data || []).filter(u => !excludeIds.includes(u.id));
+
+  if (!results.length) {
+    document.getElementById('invite-user-results').innerHTML = '<div class="search-loading">No new users found</div>';
+    return;
+  }
+
+  document.getElementById('invite-user-results').innerHTML = results.map(u => `
+    <div class="user-result" onclick="addInviteMember('${u.id}','${escHtml(u.display_name)}','${escHtml(u.initials)}','${u.avatar_color || ''}')">
+      <div class="avatar" style="background:${u.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
+        ${escHtml(u.initials)}
+      </div>
+      <div class="user-result-info">
+        <div class="user-result-name">${escHtml(u.display_name)}</div>
+        <div class="user-result-username">@${escHtml(u.username)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function addInviteMember(id, displayName, ini, color) {
+  if (inviteSelectedMembers.find(m => m.id === id)) return;
+  inviteSelectedMembers.push({ id, display_name: displayName, initials: ini, avatar_color: color });
+  renderInviteSelectedMembers();
+  document.getElementById('invite-user-search').value = '';
+  document.getElementById('invite-user-results').innerHTML = '<div class="search-loading">Search for more people</div>';
+}
+
+function removeInviteMember(id) {
+  inviteSelectedMembers = inviteSelectedMembers.filter(m => m.id !== id);
+  renderInviteSelectedMembers();
+}
+
+function renderInviteSelectedMembers() {
+  document.getElementById('invite-selected-members').innerHTML = inviteSelectedMembers.map(m => `
+    <div class="member-chip">
+      <div class="avatar" style="width:22px;height:22px;font-size:9px;background:${m.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">${escHtml(m.initials)}</div>
+      ${escHtml(m.display_name)}
+      <button class="member-chip-remove" onclick="removeInviteMember('${m.id}')">×</button>
+    </div>
+  `).join('');
+}
+
+async function addInviteMembers() {
+  if (!inviteSelectedMembers.length) { showToast('ℹ️ Select at least one person to add'); return; }
+  setLoading('invite-add-btn', true);
+
+  const participants = inviteSelectedMembers.map(m => ({
+    conversation_id: activeConversation.id,
+    user_id: m.id,
+    role: 'member',
+  }));
+
+  const { error } = await db.from('conversation_participants').insert(participants);
+  setLoading('invite-add-btn', false, 'Add Selected Members');
+
+  if (error) { showToast('❌ Could not add members'); return; }
+
+  showToast(`✅ ${inviteSelectedMembers.length} member(s) added!`);
+  closeInviteModal();
+  await loadGroupMembers(activeConversation.id);
+  inviteSelectedMembers = [];
+}
+
+// ══════════════════════════════════════════════
+//  LEAVE GROUP
+// ══════════════════════════════════════════════
+async function leaveGroup(convId) {
+  if (!confirm('Are you sure you want to leave this group?')) return;
+  await db.from('conversation_participants').delete().eq('conversation_id', convId).eq('user_id', currentProfile.id);
+  activeConversation = null;
+  document.getElementById('active-chat').classList.add('hidden');
+  document.getElementById('welcome-screen').classList.remove('hidden');
+  document.getElementById('info-panel').classList.add('hidden');
+  infoPanelOpen = false;
+  showToast('👋 Left the group');
+  await loadConversations();
 }
 
 // ══════════════════════════════════════════════
@@ -1394,6 +1989,25 @@ async function startConversation(otherUserId) {
 function toggleInfoPanel() {
   infoPanelOpen = !infoPanelOpen;
   document.getElementById('info-panel').classList.toggle('hidden', !infoPanelOpen);
+}
+
+// ══════════════════════════════════════════════
+//  INVITE LINK JOIN (on page load)
+// ══════════════════════════════════════════════
+async function checkInviteLink() {
+  const params = new URLSearchParams(window.location.search);
+  const groupId = params.get('join');
+  if (!groupId || !currentProfile) return;
+  // Try to join the group
+  const { data: existing } = await db.from('conversation_participants').select('conversation_id').eq('conversation_id', groupId).eq('user_id', currentProfile.id).single();
+  if (!existing) {
+    await db.from('conversation_participants').insert({ conversation_id: groupId, user_id: currentProfile.id, role: 'member' });
+    showToast('🎉 Joined the group!');
+  }
+  // Clear URL param
+  history.replaceState({}, '', window.location.pathname);
+  await loadConversations();
+  openConversation(groupId);
 }
 
 // ══════════════════════════════════════════════
@@ -1407,6 +2021,7 @@ async function init() {
     if (profile) {
       currentProfile = profile;
       enterApp();
+      await checkInviteLink();
     } else {
       showProfileSetup();
     }
@@ -1415,19 +2030,9 @@ async function init() {
 
 init();
 
-// Update avatar preview initials as user types name
-document.getElementById('profile-name').addEventListener('input', function() {
-  const val = this.value.trim();
-  const span = document.getElementById('avatar-preview-initials');
-  if (span && !selectedAvatarFile) {
-    span.textContent = val ? initials(val) : '?';
-  }
-});
-
-// Close modal on overlay click
-document.getElementById('new-chat-modal').addEventListener('click', function(e) {
-  if (e.target === this) closeNewChatModal();
-});
+// Close modals on overlay click
+document.getElementById('new-chat-modal').addEventListener('click', function(e) { if (e.target === this) closeNewChatModal(); });
+document.getElementById('invite-modal').addEventListener('click', function(e) { if (e.target === this) closeInviteModal(); });
 </script>
 </body>
 </html>
