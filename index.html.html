@@ -443,6 +443,31 @@ alter publication supabase_realtime add table messages;
     min-height:100vh; padding:20px;
   }
 
+  /* ── AVATAR UPLOAD ── */
+  .avatar-upload-wrap {
+    display:flex; flex-direction:column; align-items:center; gap:10px; margin-bottom:24px;
+  }
+  .avatar-upload-circle {
+    width:88px; height:88px; border-radius:50%;
+    background:linear-gradient(135deg,var(--accent),var(--pink));
+    display:flex; align-items:center; justify-content:center;
+    font-size:32px; font-weight:700; color:#fff;
+    position:relative; cursor:pointer; overflow:hidden;
+    border:3px solid var(--border2); transition:all 0.2s;
+    flex-shrink:0;
+  }
+  .avatar-upload-circle:hover .avatar-upload-overlay { opacity:1; }
+  .avatar-upload-circle img {
+    width:100%; height:100%; object-fit:cover; position:absolute; inset:0;
+  }
+  .avatar-upload-overlay {
+    position:absolute; inset:0; background:rgba(0,0,0,0.55);
+    display:flex; align-items:center; justify-content:center;
+    font-size:22px; opacity:0; transition:opacity 0.2s; border-radius:50%;
+  }
+  .avatar-upload-hint { font-size:12px; color:var(--text3); }
+  #avatar-file-input { display:none; }
+
   /* ── TOAST ── */
   .toast {
     position:fixed; bottom:28px; left:50%; transform:translateX(-50%) translateY(20px);
@@ -573,6 +598,17 @@ alter publication supabase_realtime add table messages;
     </div>
     <div class="auth-title">Set up your profile</div>
     <div class="auth-sub">Almost there! Just a few details.</div>
+
+    <!-- Avatar Upload -->
+    <div class="avatar-upload-wrap">
+      <div class="avatar-upload-circle" id="avatar-preview-circle" onclick="document.getElementById('avatar-file-input').click()">
+        <span id="avatar-preview-initials">?</span>
+        <div class="avatar-upload-overlay">📷</div>
+      </div>
+      <div class="avatar-upload-hint">Tap to upload profile photo</div>
+      <input type="file" id="avatar-file-input" accept="image/*" onchange="handleAvatarSelect(event)">
+    </div>
+
     <div class="form-group">
       <label class="form-label">Display Name</label>
       <input type="text" id="profile-name" class="form-input" placeholder="Your full name">
@@ -749,6 +785,7 @@ let conversations = [];
 let realtimeChannel = null;
 let infoPanelOpen = false;
 let userSearchTimeout = null;
+let selectedAvatarFile = null;
 
 const AVATAR_COLORS = [
   'linear-gradient(135deg,#6366f1,#ec4899)',
@@ -760,6 +797,37 @@ const AVATAR_COLORS = [
 ];
 
 function randomColor() { return AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)]; }
+
+function handleAvatarSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { showToast('❌ Image must be under 5MB'); return; }
+  selectedAvatarFile = file;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const circle = document.getElementById('avatar-preview-circle');
+    // Remove initials span, show image
+    let img = circle.querySelector('img');
+    if (!img) {
+      img = document.createElement('img');
+      circle.insertBefore(img, circle.firstChild);
+    }
+    img.src = e.target.result;
+    const initSpan = document.getElementById('avatar-preview-initials');
+    if (initSpan) initSpan.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function uploadAvatar(userId) {
+  if (!selectedAvatarFile) return null;
+  const ext = selectedAvatarFile.name.split('.').pop();
+  const path = `${userId}/avatar.${ext}`;
+  const { error } = await db.storage.from('avatars').upload(path, selectedAvatarFile, { upsert: true });
+  if (error) { console.error('Avatar upload error:', error); return null; }
+  const { data } = db.storage.from('avatars').getPublicUrl(path);
+  return data.publicUrl + '?t=' + Date.now();
+}
 
 function initials(name) {
   return name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
@@ -933,13 +1001,20 @@ async function saveProfile() {
   if (username.length < 3) { document.getElementById('profile-username-err').classList.add('show'); return; }
 
   setLoading('profile-btn', true);
-  const { error } = await db.from('profiles').insert({
+
+  // Upload avatar if selected
+  const avatarUrl = await uploadAvatar(currentUser.id);
+
+  const profileData = {
     id: currentUser.id,
     username,
     display_name: name,
     initials: initials(name),
     avatar_color: randomColor(),
-  });
+  };
+  if (avatarUrl) profileData.avatar_url = avatarUrl;
+
+  const { error } = await db.from('profiles').insert(profileData);
   setLoading('profile-btn', false);
   document.getElementById('profile-btn').textContent = 'Save & Continue →';
 
@@ -979,7 +1054,14 @@ function enterApp() {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('profile-screen').style.display = 'none';
   document.getElementById('app-screen').classList.add('visible');
-  document.getElementById('user-mini-avatar').textContent = currentProfile.initials;
+
+  const miniAvatar = document.getElementById('user-mini-avatar');
+  if (currentProfile.avatar_url) {
+    miniAvatar.innerHTML = `<img src="${currentProfile.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
+    miniAvatar.textContent = '';
+  } else {
+    miniAvatar.textContent = currentProfile.initials;
+  }
   loadConversations();
 }
 
@@ -1044,14 +1126,24 @@ function renderConversationsEmpty() {
     </div>`;
 }
 
+function avatarHtmlSmall(profile, showDot = false) {
+  if (profile.avatar_url) {
+    return `<div class="avatar" style="background:#1c2236;overflow:hidden;">
+      <img src="${profile.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">
+      ${showDot ? '<span class="dot"></span>' : ''}
+    </div>`;
+  }
+  return `<div class="avatar" style="background:${profile.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
+    ${escHtml(profile.initials)}
+    ${showDot ? '<span class="dot"></span>' : ''}
+  </div>`;
+}
+
 function renderContactsList(list) {
   if (!list || list.length === 0) { renderConversationsEmpty(); return; }
   document.getElementById('contacts-list').innerHTML = list.map(c => `
     <div class="contact-item ${activeConversation === c.id ? 'active' : ''}" onclick="openConversation('${c.id}')">
-      <div class="avatar" style="background:${c.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">
-        ${escHtml(c.other.initials)}
-        <span class="dot"></span>
-      </div>
+      ${avatarHtmlSmall(c.other, true)}
       <div class="contact-info">
         <div class="contact-name">${escHtml(c.other.display_name)}</div>
         <div class="contact-last">${escHtml(c.lastMessage)}</div>
@@ -1090,14 +1182,27 @@ async function openConversation(convId) {
   activeChat.classList.remove('hidden');
   activeChat.style.display = 'flex';
 
-  document.getElementById('chat-avatar').textContent = conv.other.initials;
-  document.getElementById('chat-avatar').style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
+  // Update chat header avatar
+  const chatAvatar = document.getElementById('chat-avatar');
+  if (conv.other.avatar_url) {
+    chatAvatar.innerHTML = `<img src="${conv.other.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
+    chatAvatar.style.background = '#1c2236';
+  } else {
+    chatAvatar.textContent = conv.other.initials;
+    chatAvatar.style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
+  }
   document.getElementById('chat-name').textContent = conv.other.display_name;
   document.getElementById('chat-status').textContent = '@' + conv.other.username;
 
-  // Info panel
-  document.getElementById('info-avatar-txt').textContent = conv.other.initials;
-  document.getElementById('info-avatar-txt').style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
+  // Info panel avatar
+  const infoAvatar = document.getElementById('info-avatar-txt');
+  if (conv.other.avatar_url) {
+    infoAvatar.innerHTML = `<img src="${conv.other.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
+    infoAvatar.style.background = '#1c2236';
+  } else {
+    infoAvatar.textContent = conv.other.initials;
+    infoAvatar.style.background = conv.other.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)';
+  }
   document.getElementById('info-name-txt').textContent = conv.other.display_name;
   document.getElementById('info-email-txt').textContent = '@' + conv.other.username;
 
@@ -1134,7 +1239,7 @@ function renderMessages(msgs) {
     lastSender = m.sender_id;
 
     const avatarHtml = !isMine && !sameSender
-      ? `<div class="msg-avatar"><div class="avatar" style="background:${activeContact?.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)'}">${escHtml(activeContact?.initials || '?')}</div></div>`
+      ? `<div class="msg-avatar"><div class="avatar" style="background:${activeContact?.avatar_url ? '#1c2236' : (activeContact?.avatar_color || 'linear-gradient(135deg,#6366f1,#ec4899)')};overflow:hidden;">${activeContact?.avatar_url ? `<img src="${activeContact.avatar_url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` : escHtml(activeContact?.initials || '?')}</div></div>`
       : (!isMine ? '<div style="width:28px;flex-shrink:0"></div>' : '');
 
     html += `<div class="msg-row ${isMine ? 'mine' : ''}">
@@ -1308,6 +1413,15 @@ async function init() {
 }
 
 init();
+
+// Update avatar preview initials as user types name
+document.getElementById('profile-name').addEventListener('input', function() {
+  const val = this.value.trim();
+  const span = document.getElementById('avatar-preview-initials');
+  if (span && !selectedAvatarFile) {
+    span.textContent = val ? initials(val) : '?';
+  }
+});
 
 // Close modal on overlay click
 document.getElementById('new-chat-modal').addEventListener('click', function(e) {
